@@ -124,7 +124,7 @@ export class CanvaExportService {
       await this.goToDesignPage(page, sourceUrl, pageNumber);
       await this.removeViewerChrome(page);
 
-      const size = await this.detectRenderedDesignSize(page);
+      const size = await this.prepareContentOnlyPrint(page);
       const pagePdf = await page.pdf({
         printBackground: true,
         width: `${size.width}px`,
@@ -141,6 +141,88 @@ export class CanvaExportService {
     await writeFile(targetPath, await outputPdf.save());
 
     return targetPath;
+  }
+
+  private async prepareContentOnlyPrint(page: Page): Promise<RenderSize> {
+    const size = await this.detectRenderedDesignSize(page);
+    await page.setViewportSize(size);
+
+    await page.evaluate((targetSize) => {
+      const browserGlobal = globalThis as typeof globalThis & Window;
+      const document = browserGlobal.document;
+      const contentRoot = findContentRoot();
+
+      document.documentElement.style.width = `${targetSize.width}px`;
+      document.documentElement.style.height = `${targetSize.height}px`;
+      document.documentElement.style.margin = "0";
+      document.documentElement.style.padding = "0";
+      document.documentElement.style.overflow = "hidden";
+      document.documentElement.style.background = "transparent";
+
+      document.body.style.width = `${targetSize.width}px`;
+      document.body.style.height = `${targetSize.height}px`;
+      document.body.style.margin = "0";
+      document.body.style.padding = "0";
+      document.body.style.overflow = "hidden";
+      document.body.style.background = "transparent";
+
+      if (!contentRoot) {
+        return;
+      }
+
+      contentRoot.style.position = "fixed";
+      contentRoot.style.top = "0";
+      contentRoot.style.left = "0";
+      contentRoot.style.width = `${targetSize.width}px`;
+      contentRoot.style.height = `${targetSize.height}px`;
+      contentRoot.style.margin = "0";
+      contentRoot.style.transform = "none";
+      contentRoot.style.zIndex = "2147483647";
+
+      for (const element of Array.from(document.body.children)) {
+        if (element !== contentRoot && !element.contains(contentRoot)) {
+          (element as HTMLElement).style.background = "transparent";
+        }
+      }
+
+      function findContentRoot() {
+        const candidates = Array.from(
+          document.querySelectorAll<HTMLElement>("._8jGYJw"),
+        )
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            const styleWidth = parseCssPx(element.style.width);
+            const styleHeight = parseCssPx(element.style.height);
+            const width = styleWidth || rect.width;
+            const height = styleHeight || rect.height;
+
+            return {
+              element,
+              width,
+              height,
+              area: width * height,
+              visible:
+                width >= 100 &&
+                height >= 100 &&
+                rect.bottom > 0 &&
+                rect.right > 0 &&
+                rect.top < browserGlobal.innerHeight &&
+                rect.left < browserGlobal.innerWidth,
+            };
+          })
+          .filter((candidate) => candidate.visible)
+          .sort((a, b) => b.area - a.area);
+
+        return candidates[0]?.element ?? null;
+      }
+
+      function parseCssPx(value: string) {
+        const match = value.match(/^([\d.]+)px$/);
+        return match ? Number(match[1]) : 0;
+      }
+    }, size);
+
+    return size;
   }
 
   private async detectPageCount(page: Page) {
@@ -228,6 +310,7 @@ export class CanvaExportService {
       const viewportWidth = browserGlobal.innerWidth;
       const viewportHeight = browserGlobal.innerHeight;
       const selectors = [
+        "._8jGYJw",
         "canvas",
         "svg",
         "img",
@@ -246,13 +329,18 @@ export class CanvaExportService {
       const candidates = elements
         .map((element) => {
           const rect = element.getBoundingClientRect();
+          const styleWidth = parseCssPx(element.style.width);
+          const styleHeight = parseCssPx(element.style.height);
+          const width = styleWidth || rect.width;
+          const height = styleHeight || rect.height;
+
           return {
-            width: Math.round(rect.width),
-            height: Math.round(rect.height),
-            area: Math.round(rect.width * rect.height),
+            width: Math.round(width),
+            height: Math.round(height),
+            area: Math.round(width * height),
             visible:
-              rect.width >= 100 &&
-              rect.height >= 100 &&
+              width >= 100 &&
+              height >= 100 &&
               rect.bottom > 0 &&
               rect.right > 0 &&
               rect.top < viewportHeight &&
@@ -275,6 +363,11 @@ export class CanvaExportService {
         width: viewportWidth,
         height: viewportHeight,
       };
+
+      function parseCssPx(value: string) {
+        const match = value.match(/^([\d.]+)px$/);
+        return match ? Number(match[1]) : 0;
+      }
     });
 
     return this.normalizePdfSize(size);
