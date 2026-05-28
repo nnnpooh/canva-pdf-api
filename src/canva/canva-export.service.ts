@@ -3,7 +3,6 @@ import {
   BadRequestException,
   Injectable,
   Logger,
-  ServiceUnavailableException,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
 import { basename, extname, join } from "path";
@@ -33,15 +32,9 @@ type ServerlessChromium = {
 
 @Injectable()
 export class CanvaExportService {
-  private static activeExports = 0;
-
   private readonly logger = new Logger(CanvaExportService.name);
   private readonly timeoutMs = Number(
     process.env.CANVA_EXPORT_TIMEOUT_MS ?? 120_000,
-  );
-  private readonly maxConcurrentExports = this.readPositiveIntegerEnv(
-    "CANVA_EXPORT_CONCURRENCY",
-    1,
   );
 
   async exportPublicDesign(url: string): Promise<ExportedPdf> {
@@ -49,8 +42,6 @@ export class CanvaExportService {
 
     const id = randomUUID();
     const fileName = `${this.slugFromUrl(url)}-${id}.pdf`;
-
-    this.acquireExportSlot();
 
     let browser: Browser | undefined;
 
@@ -79,32 +70,7 @@ export class CanvaExportService {
       );
     } finally {
       await browser?.close();
-      this.releaseExportSlot();
     }
-  }
-
-  private acquireExportSlot() {
-    if (CanvaExportService.activeExports >= this.maxConcurrentExports) {
-      throw new ServiceUnavailableException(
-        "Canva export worker is busy. Please retry shortly.",
-      );
-    }
-
-    CanvaExportService.activeExports += 1;
-  }
-
-  private releaseExportSlot() {
-    CanvaExportService.activeExports = Math.max(
-      0,
-      CanvaExportService.activeExports - 1,
-    );
-  }
-
-  private readPositiveIntegerEnv(name: string, fallback: number) {
-    const rawValue = process.env[name];
-    const value = rawValue ? Number(rawValue) : fallback;
-
-    return Number.isInteger(value) && value > 0 ? value : fallback;
   }
 
   private async launchBrowser() {
