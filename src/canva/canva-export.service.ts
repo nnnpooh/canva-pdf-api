@@ -5,8 +5,8 @@ import {
   Logger,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
-import { basename, extname } from "path";
-import serverlessChromium from "@sparticuz/chromium";
+import { basename, extname, join } from "path";
+import { pathToFileURL } from "url";
 import { PDFDocument } from "pdf-lib";
 import {
   chromium as playwrightChromium,
@@ -23,6 +23,11 @@ export type ExportedPdf = {
 type RenderSize = {
   width: number;
   height: number;
+};
+
+type ServerlessChromium = {
+  args: string[];
+  executablePath: () => Promise<string>;
 };
 
 @Injectable()
@@ -72,27 +77,54 @@ export class CanvaExportService {
     const options: LaunchOptions = {
       headless: process.env.PLAYWRIGHT_HEADLESS !== "false",
     };
-    const executablePath = await this.resolveChromiumExecutablePath();
+    const chromiumConfig = await this.resolveChromiumLaunchConfig();
 
-    if (executablePath) {
-      options.executablePath = executablePath;
-      options.args = serverlessChromium.args;
+    if (chromiumConfig.executablePath) {
+      options.executablePath = chromiumConfig.executablePath;
+      options.args = chromiumConfig.args;
       options.headless = true;
     }
 
     return playwrightChromium.launch(options);
   }
 
-  private async resolveChromiumExecutablePath() {
-    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
-      return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  private async resolveChromiumLaunchConfig(): Promise<{
+    args?: string[];
+    executablePath?: string;
+  }> {
+    const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+
+    if (this.isServerlessRuntime()) {
+      const serverlessChromium = await this.importServerlessChromium();
+
+      return {
+        args: serverlessChromium.args,
+        executablePath: executablePath ?? (await serverlessChromium.executablePath()),
+      };
     }
 
-    if (process.env.VERCEL === "1" || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-      return serverlessChromium.executablePath();
+    if (executablePath) {
+      return { executablePath };
     }
 
-    return undefined;
+    return {};
+  }
+
+  private isServerlessRuntime() {
+    return process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+  }
+
+  private async importServerlessChromium(): Promise<ServerlessChromium> {
+    const dynamicImport = new Function(
+      "specifier",
+      "return import(specifier)",
+    ) as (specifier: string) => Promise<{ default: ServerlessChromium }>;
+    const chromiumBridgeUrl = pathToFileURL(
+      join(process.cwd(), "src/serverless-chromium.mjs"),
+    ).href;
+    const chromiumModule = await dynamicImport(chromiumBridgeUrl);
+
+    return chromiumModule.default;
   }
 
   private async assertPublicCanvaUrl(url: string) {

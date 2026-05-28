@@ -4,3 +4,5 @@ coverage
 .env
 storage/downloads/*
 !storage/downloads/.gitkeep
+.vercel
+.env*.local
