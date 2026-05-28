@@ -1,10 +1,7 @@
 import {
   Body,
   Controller,
-  Get,
   Header,
-  NotFoundException,
-  Param,
   Post,
   Res,
 } from '@nestjs/common';
@@ -17,25 +14,15 @@ export class CanvaController {
   constructor(private readonly canvaExportService: CanvaExportService) {}
 
   @Post('export')
-  async exportPdf(@Body() dto: ExportCanvaDto) {
+  @Header('Content-Type', 'application/pdf')
+  async exportPdf(@Body() dto: ExportCanvaDto, @Res() response: Response) {
     const result = await this.canvaExportService.exportPublicDesign(dto.url);
 
-    return {
-      id: result.id,
-      fileName: result.fileName,
-      downloadUrl: `/canva/download/${result.id}`,
-    };
-  }
-
-  @Get('download/:id')
-  @Header('Content-Type', 'application/pdf')
-  async downloadPdf(@Param('id') id: string, @Res() response: Response) {
-    const file = await this.canvaExportService.getExportedFile(id);
-
-    if (!file) {
-      throw new NotFoundException('PDF export not found');
-    }
-
-    response.download(file.path, file.fileName);
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.fileName}"`,
+    );
+    response.setHeader('Content-Length', result.buffer.length);
+    response.send(result.buffer);
   }
 }

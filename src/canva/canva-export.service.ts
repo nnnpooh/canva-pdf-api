@@ -5,15 +5,13 @@ import {
   Logger,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
-import { mkdir, stat, writeFile } from "fs/promises";
-import { basename, extname, join, resolve } from "path";
+import { basename, extname } from "path";
 import { PDFDocument } from "pdf-lib";
 import { chromium, type Browser, type Page } from "playwright";
 
-type ExportedFile = {
-  id: string;
+export type ExportedPdf = {
   fileName: string;
-  path: string;
+  buffer: Buffer;
 };
 
 type RenderSize = {
@@ -24,20 +22,15 @@ type RenderSize = {
 @Injectable()
 export class CanvaExportService {
   private readonly logger = new Logger(CanvaExportService.name);
-  private readonly downloadDir = resolve(
-    process.env.DOWNLOAD_DIR ?? "storage/downloads",
-  );
   private readonly timeoutMs = Number(
     process.env.CANVA_EXPORT_TIMEOUT_MS ?? 120_000,
   );
 
-  async exportPublicDesign(url: string): Promise<ExportedFile> {
+  async exportPublicDesign(url: string): Promise<ExportedPdf> {
     await this.assertPublicCanvaUrl(url);
-    await mkdir(this.downloadDir, { recursive: true });
 
     const id = randomUUID();
     const fileName = `${this.slugFromUrl(url)}-${id}.pdf`;
-    const targetPath = join(this.downloadDir, fileName);
 
     let browser: Browser | undefined;
 
@@ -58,9 +51,9 @@ export class CanvaExportService {
       this.assertResolvedCanvaUrl(page.url());
 
       await this.dismissCookieBanner(page);
-      await this.triggerPrintToPdf(page, targetPath);
+      const buffer = await this.triggerPrintToPdf(page);
 
-      return { id, fileName, path: targetPath };
+      return { fileName, buffer };
     } catch (error) {
       this.logger.error(error);
       throw new BadGatewayException(
@@ -69,19 +62,6 @@ export class CanvaExportService {
     } finally {
       await browser?.close();
     }
-  }
-
-  async getExportedFile(id: string): Promise<ExportedFile | null> {
-    if (!/^[0-9a-f-]{36}$/i.test(id)) {
-      return null;
-    }
-
-    const files = await this.findDownloadById(id);
-    if (!files) {
-      return null;
-    }
-
-    return files;
   }
 
   private async assertPublicCanvaUrl(url: string) {
@@ -112,7 +92,7 @@ export class CanvaExportService {
     }
   }
 
-  private async triggerPrintToPdf(page: Page, targetPath: string) {
+  private async triggerPrintToPdf(page: Page) {
     await page.waitForLoadState("networkidle", { timeout: this.timeoutMs });
     await page.emulateMedia({ media: "screen" });
 
@@ -138,9 +118,7 @@ export class CanvaExportService {
       outputPdf.addPage(inputPage);
     }
 
-    await writeFile(targetPath, await outputPdf.save());
-
-    return targetPath;
+    return Buffer.from(await outputPdf.save());
   }
 
   private async prepareContentOnlyPrint(page: Page): Promise<RenderSize> {
@@ -397,32 +375,6 @@ export class CanvaExportService {
         return;
       }
     }
-  }
-
-  private async findDownloadById(id: string): Promise<ExportedFile | null> {
-    await mkdir(this.downloadDir, { recursive: true });
-
-    const prefix = `${id}.pdf`;
-    const directPath = join(this.downloadDir, prefix);
-
-    if (await this.fileExists(directPath)) {
-      return { id, fileName: prefix, path: directPath };
-    }
-
-    const { readdir } = await import("fs/promises");
-    const fileName = (await readdir(this.downloadDir)).find((file) =>
-      file.endsWith(`${id}.pdf`),
-    );
-
-    return fileName
-      ? { id, fileName, path: join(this.downloadDir, fileName) }
-      : null;
-  }
-
-  private async fileExists(path: string) {
-    return stat(path)
-      .then(() => true)
-      .catch(() => false);
   }
 
   private slugFromUrl(url: string) {

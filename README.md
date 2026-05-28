@@ -18,25 +18,11 @@ npm run start:dev
 ```bash
 curl -X POST http://localhost:5001/canva/export \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://canva.link/rf6rzlnni2fpmuk"}'
-```
-
-Response:
-
-```json
-{
-  "id": "9d491782-6383-4b79-9ce2-31a8696bda62",
-  "fileName": "view-9d491782-6383-4b79-9ce2-31a8696bda62.pdf",
-  "downloadUrl": "/canva/download/9d491782-6383-4b79-9ce2-31a8696bda62"
-}
-```
-
-### Download PDF
-
-```bash
-curl -L http://localhost:5001/canva/download/9d491782-6383-4b79-9ce2-31a8696bda62 \
+  -d '{"url":"https://canva.link/rf6rzlnni2fpmuk"}' \
   -o canva.pdf
 ```
+
+Response là file PDF trực tiếp với header `Content-Disposition: attachment`.
 
 ## Lưu ý
 
