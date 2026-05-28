@@ -6,8 +6,14 @@ import {
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
 import { basename, extname } from "path";
+import serverlessChromium from "@sparticuz/chromium";
 import { PDFDocument } from "pdf-lib";
-import { chromium, type Browser, type Page } from "playwright";
+import {
+  chromium as playwrightChromium,
+  type Browser,
+  type LaunchOptions,
+  type Page,
+} from "playwright";
 
 export type ExportedPdf = {
   fileName: string;
@@ -35,9 +41,7 @@ export class CanvaExportService {
     let browser: Browser | undefined;
 
     try {
-      browser = await chromium.launch({
-        headless: process.env.PLAYWRIGHT_HEADLESS !== "false",
-      });
+      browser = await this.launchBrowser();
 
       const context = await browser.newContext({
         viewport: { width: 1440, height: 1000 },
@@ -62,6 +66,33 @@ export class CanvaExportService {
     } finally {
       await browser?.close();
     }
+  }
+
+  private async launchBrowser() {
+    const options: LaunchOptions = {
+      headless: process.env.PLAYWRIGHT_HEADLESS !== "false",
+    };
+    const executablePath = await this.resolveChromiumExecutablePath();
+
+    if (executablePath) {
+      options.executablePath = executablePath;
+      options.args = serverlessChromium.args;
+      options.headless = true;
+    }
+
+    return playwrightChromium.launch(options);
+  }
+
+  private async resolveChromiumExecutablePath() {
+    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+      return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+    }
+
+    if (process.env.VERCEL === "1" || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+      return serverlessChromium.executablePath();
+    }
+
+    return undefined;
   }
 
   private async assertPublicCanvaUrl(url: string) {
