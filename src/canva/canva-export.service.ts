@@ -54,12 +54,11 @@ export class CanvaExportService {
       const page = await context.newPage();
 
       await page.goto(url, {
-        waitUntil: "domcontentloaded",
+        waitUntil: "load",
         timeout: this.timeoutMs,
       });
       this.assertResolvedCanvaUrl(page.url());
 
-      await this.dismissCookieBanner(page);
       const buffer = await this.triggerPrintToPdf(page);
 
       return { fileName, buffer };
@@ -75,6 +74,7 @@ export class CanvaExportService {
 
   private async launchBrowser() {
     const options: LaunchOptions = {
+      // headless: false,
       headless: process.env.PLAYWRIGHT_HEADLESS !== "false",
     };
     const chromiumConfig = await this.resolveChromiumLaunchConfig();
@@ -99,7 +99,8 @@ export class CanvaExportService {
 
       return {
         args: serverlessChromium.args,
-        executablePath: executablePath ?? (await serverlessChromium.executablePath()),
+        executablePath:
+          executablePath ?? (await serverlessChromium.executablePath()),
       };
     }
 
@@ -111,7 +112,10 @@ export class CanvaExportService {
   }
 
   private isServerlessRuntime() {
-    return process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+    return (
+      process.env.VERCEL === "1" ||
+      Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME)
+    );
   }
 
   private async importServerlessChromium(): Promise<ServerlessChromium> {
@@ -135,9 +139,7 @@ export class CanvaExportService {
     }
 
     if (
-      !["canva.com", "www.canva.com", "canva.link"].includes(
-        parsedUrl.hostname,
-      )
+      !["canva.com", "www.canva.com", "canva.link"].includes(parsedUrl.hostname)
     ) {
       throw new BadRequestException(
         "Only canva.com and canva.link links are supported",
@@ -156,17 +158,20 @@ export class CanvaExportService {
   }
 
   private async triggerPrintToPdf(page: Page) {
-    await page.waitForLoadState("networkidle", { timeout: this.timeoutMs });
+    await page.waitForLoadState("load", {
+      timeout: this.timeoutMs,
+    });
     await page.emulateMedia({ media: "screen" });
 
-    const sourceUrl = page.url();
+    const sourceUrl = page.url().split("?")?.[0];
     const pageCount = await this.detectPageCount(page);
     const outputPdf = await PDFDocument.create();
 
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
       await this.goToDesignPage(page, sourceUrl, pageNumber);
-      await this.removeViewerChrome(page);
-
+      if (pageNumber === 1) {
+        await this.removeViewerChrome(page);
+      }
       const size = await this.prepareContentOnlyPrint(page);
       const pagePdf = await page.pdf({
         printBackground: true,
@@ -268,32 +273,17 @@ export class CanvaExportService {
 
   private async detectPageCount(page: Page) {
     const pageCount = await page.evaluate(() => {
-      const browserGlobal = globalThis as typeof globalThis & Window;
-      const slider = browserGlobal.document.querySelector<HTMLElement>(
-        '[aria-label="Thanh trượt thiết kế"][aria-valuemax], [role="slider"][aria-valuemax]',
-      );
-      const max = slider?.getAttribute("aria-valuemax");
-
-      if (max) {
-        const parsedMax = Number(max);
-        if (Number.isInteger(parsedMax) && parsedMax > 0) {
-          return parsedMax;
-        }
-      }
-
-      const pageAccessButton = Array.from(
-        browserGlobal.document.querySelectorAll("button"),
-      ).find((button) => /truy cập trang|go to page/i.test(button.ariaLabel ?? ""));
-      const text = pageAccessButton?.textContent ?? "";
-      const totalFromText = text.match(/\/\s*(\d+)/)?.[1];
-
-      return totalFromText ? Number(totalFromText) : 1;
+      return document.querySelectorAll("._5yhCRQ").length;
     });
 
-    return Number.isInteger(pageCount) && pageCount > 0 ? pageCount : 1;
+    return pageCount > 0 ? pageCount : 1;
   }
 
-  private async goToDesignPage(page: Page, sourceUrl: string, pageNumber: number) {
+  private async goToDesignPage(
+    page: Page,
+    sourceUrl: string,
+    pageNumber: number,
+  ) {
     const pageUrl = this.withPageHash(sourceUrl, pageNumber);
 
     if (page.url() !== pageUrl) {
@@ -303,8 +293,8 @@ export class CanvaExportService {
       });
     }
 
-    await page.waitForLoadState("networkidle", { timeout: this.timeoutMs });
-    await page.waitForTimeout(500);
+    // await page.waitForLoadState("networkidle", { timeout: this.timeoutMs });
+    // await page.waitForTimeout(1500);
   }
 
   private withPageHash(url: string, pageNumber: number) {
@@ -317,23 +307,7 @@ export class CanvaExportService {
   private async removeViewerChrome(page: Page) {
     await page.evaluate(() => {
       const browserGlobal = globalThis as typeof globalThis & Window;
-      const selectors = [
-        "header",
-        "footer",
-        '[aria-labelledby="viewerFooterLabel"]',
-        '[role="toolbar"]',
-        '[role="dialog"]',
-        '[role="menu"]',
-        '[role="tooltip"]',
-        '[aria-label="Chia sẻ"]',
-        '[aria-label="Trượt"]',
-        '[aria-label="Phóng to và thu nhỏ"]',
-        '[aria-label="Xem thêm"]',
-        '[aria-label="Mở chế độ toàn màn hình"]',
-        '[aria-label="Trang trước đó"]',
-        '[aria-label="Trang tiếp theo"]',
-        '[aria-label="Truy cập trang"]',
-      ];
+      const selectors = ["header", "footer"];
 
       for (const selector of selectors) {
         for (const element of Array.from(
@@ -424,20 +398,6 @@ export class CanvaExportService {
     );
 
     return { width, height };
-  }
-
-  private async dismissCookieBanner(page: Page) {
-    for (const selector of [
-      'button:has-text("Accept all")',
-      'button:has-text("Accept All")',
-      'button:has-text("I agree")',
-    ]) {
-      const locator = page.locator(selector).first();
-      if (await locator.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await locator.click();
-        return;
-      }
-    }
   }
 
   private slugFromUrl(url: string) {
