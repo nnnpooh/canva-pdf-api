@@ -1,6 +1,8 @@
 import {
   BadGatewayException,
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
 } from "@nestjs/common";
@@ -8,12 +10,12 @@ import { createHash, randomUUID } from "crypto";
 import { basename, extname, join } from "path";
 import { pathToFileURL } from "url";
 import { PDFDocument } from "pdf-lib";
-import {
-  chromium as playwrightChromium,
+import puppeteer from "puppeteer";
+import puppeteerCore, {
   type Browser,
   type LaunchOptions,
   type Page,
-} from "playwright";
+} from "puppeteer-core";
 
 export type ExportedPdf = {
   fileName: string;
@@ -32,67 +34,140 @@ type ServerlessChromium = {
 
 @Injectable()
 export class CanvaExportService {
+  private static exportQueue: Promise<void> = Promise.resolve();
+  private static exportRequestTimestamps: number[] = [];
+
   private readonly logger = new Logger(CanvaExportService.name);
   private readonly timeoutMs = Number(
     process.env.CANVA_EXPORT_TIMEOUT_MS ?? 120_000,
   );
+  private readonly maxExportsPerWindow = this.readPositiveIntegerEnv(
+    "CANVA_EXPORT_RATE_LIMIT",
+    10,
+  );
+  private readonly rateLimitWindowMs = this.readPositiveIntegerEnv(
+    "CANVA_EXPORT_RATE_LIMIT_WINDOW_MS",
+    60_000,
+  );
+  private readonly commonChromiumArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--window-size=1440,1000",
+  ];
 
   async exportPublicDesign(url: string): Promise<ExportedPdf> {
     await this.assertPublicCanvaUrl(url);
+    this.assertWithinRateLimit();
 
-    const id = randomUUID();
-    const fileName = `${this.slugFromUrl(url)}-${id}.pdf`;
+    return this.runExclusiveExport(async () => {
+      const id = randomUUID();
+      const fileName = `${this.slugFromUrl(url)}-${id}.pdf`;
 
-    let browser: Browser | undefined;
+      let browser: Browser | undefined;
+
+      try {
+        browser = await this.launchBrowser();
+
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1440, height: 1000 });
+
+        await page.goto(url, {
+          waitUntil: "load",
+          timeout: this.timeoutMs,
+        });
+        await page.waitForSelector("._5yhCRQ", {
+          visible: true,
+          timeout: this.timeoutMs,
+        });
+        this.assertResolvedCanvaUrl(page.url());
+
+        const buffer = await this.triggerPrintToPdf(page);
+
+        return { fileName, buffer };
+      } catch (error) {
+        this.logger.error(error);
+        throw new BadGatewayException(
+          "Could not export this public Canva link to PDF",
+        );
+      } finally {
+        await browser?.close();
+      }
+    });
+  }
+
+  private assertWithinRateLimit() {
+    const now = Date.now();
+
+    CanvaExportService.exportRequestTimestamps =
+      CanvaExportService.exportRequestTimestamps.filter(
+        (timestamp) => now - timestamp < this.rateLimitWindowMs,
+      );
+
+    if (
+      CanvaExportService.exportRequestTimestamps.length >=
+      this.maxExportsPerWindow
+    ) {
+      throw new HttpException(
+        "Too many Canva export requests. Please retry later.",
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    CanvaExportService.exportRequestTimestamps.push(now);
+  }
+
+  private async runExclusiveExport<T>(task: () => Promise<T>): Promise<T> {
+    const previousExport = CanvaExportService.exportQueue;
+    let releaseCurrentExport!: () => void;
+
+    CanvaExportService.exportQueue = new Promise((resolve) => {
+      releaseCurrentExport = resolve;
+    });
+
+    await previousExport;
 
     try {
-      browser = await this.launchBrowser();
-
-      const context = await browser.newContext({
-        viewport: { width: 1440, height: 1000 },
-      });
-      const page = await context.newPage();
-
-      await page.goto(url, {
-        waitUntil: "load",
-        timeout: this.timeoutMs,
-      });
-      this.assertResolvedCanvaUrl(page.url());
-
-      const buffer = await this.triggerPrintToPdf(page);
-
-      return { fileName, buffer };
-    } catch (error) {
-      this.logger.error(error);
-      throw new BadGatewayException(
-        "Could not export this public Canva link to PDF",
-      );
+      return await task();
     } finally {
-      await browser?.close();
+      releaseCurrentExport();
     }
+  }
+
+  private readPositiveIntegerEnv(name: string, fallback: number) {
+    const rawValue = process.env[name];
+    const value = rawValue ? Number(rawValue) : fallback;
+
+    return Number.isInteger(value) && value > 0 ? value : fallback;
   }
 
   private async launchBrowser() {
     const options: LaunchOptions = {
-      // headless: false,
-      headless: process.env.PLAYWRIGHT_HEADLESS !== "false",
+      headless: process.env.PUPPETEER_HEADLESS === "false" ? false : "shell",
+      args: this.commonChromiumArgs,
     };
     const chromiumConfig = await this.resolveChromiumLaunchConfig();
 
     if (chromiumConfig.executablePath) {
       options.executablePath = chromiumConfig.executablePath;
-      options.args = chromiumConfig.args;
+      options.args = [
+        ...(chromiumConfig.args ?? []),
+        ...this.commonChromiumArgs,
+      ];
       options.headless = true;
+      return puppeteerCore.launch(options);
     }
 
-    return playwrightChromium.launch(options);
+    return puppeteer.launch(options);
   }
 
   private async resolveChromiumLaunchConfig(): Promise<{
     args?: string[];
     executablePath?: string;
   }> {
-    const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+    const executablePath = process.env.PUPPETEER_CHROMIUM_EXECUTABLE_PATH;
 
     if (this.isServerlessRuntime()) {
       const serverlessChromium = await this.importServerlessChromium();
@@ -158,19 +233,19 @@ export class CanvaExportService {
   }
 
   private async triggerPrintToPdf(page: Page) {
-    await page.waitForLoadState("load", {
+    const sourceUrl = page.url().split("?")?.[0];
+    await page.goto(sourceUrl + "#1", {
+      waitUntil: "networkidle2",
       timeout: this.timeoutMs,
     });
-    await page.emulateMedia({ media: "screen" });
+    await page.emulateMediaType("screen");
 
-    const sourceUrl = page.url().split("?")?.[0];
     const pageCount = await this.detectPageCount(page);
     const outputPdf = await PDFDocument.create();
-
+    await this.removeViewerChrome(page);
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-      await this.goToDesignPage(page, sourceUrl, pageNumber);
-      if (pageNumber === 1) {
-        await this.removeViewerChrome(page);
+      if (pageNumber !== 1) {
+        await this.goToDesignPage(page, sourceUrl, pageNumber);
       }
       const size = await this.prepareContentOnlyPrint(page);
       const pagePdf = await page.pdf({
@@ -191,7 +266,7 @@ export class CanvaExportService {
 
   private async prepareContentOnlyPrint(page: Page): Promise<RenderSize> {
     const size = await this.detectRenderedDesignSize(page);
-    await page.setViewportSize(size);
+    await page.setViewport(size);
 
     await page.evaluate((targetSize) => {
       const browserGlobal = globalThis as typeof globalThis & Window;
@@ -293,8 +368,7 @@ export class CanvaExportService {
       });
     }
 
-    // await page.waitForLoadState("networkidle", { timeout: this.timeoutMs });
-    // await page.waitForTimeout(1500);
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   private withPageHash(url: string, pageNumber: number) {
