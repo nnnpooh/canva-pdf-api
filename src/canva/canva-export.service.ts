@@ -78,16 +78,20 @@ export class CanvaExportService {
           waitUntil: "load",
           timeout: this.timeoutMs,
         });
+        const baseUrl = this.assertResolvedCanvaUrl(page.url());
+
         await page.waitForSelector("._5yhCRQ", {
           visible: true,
           timeout: this.timeoutMs,
         });
-        this.assertResolvedCanvaUrl(page.url());
-
-        const buffer = await this.triggerPrintToPdf(page);
+        const buffer = await this.triggerPrintToPdf(page, baseUrl);
 
         return { fileName, buffer };
       } catch (error) {
+        if (error instanceof HttpException) {
+          throw error;
+        }
+
         this.logger.error(error);
         throw new BadGatewayException(
           "Could not export this public Canva link to PDF",
@@ -145,6 +149,7 @@ export class CanvaExportService {
 
   private async launchBrowser() {
     const options: LaunchOptions = {
+      // headless: false,
       headless: process.env.PUPPETEER_HEADLESS === "false" ? false : "shell",
       args: this.commonChromiumArgs,
     };
@@ -230,11 +235,15 @@ export class CanvaExportService {
         "Canva short link did not resolve to a public canva.com page",
       );
     }
+    const sourceUrl = parsedUrl.origin + parsedUrl.pathname;
+    if (!sourceUrl.endsWith("view")) {
+      throw new BadRequestException("Canva video links are not supported");
+    }
+    return sourceUrl;
   }
 
-  private async triggerPrintToPdf(page: Page) {
-    const sourceUrl = page.url().split("?")?.[0];
-    await page.goto(sourceUrl + "#1", {
+  private async triggerPrintToPdf(page: Page, url: string) {
+    await page.goto(url + "#1", {
       waitUntil: "networkidle2",
       timeout: this.timeoutMs,
     });
@@ -245,7 +254,7 @@ export class CanvaExportService {
     await this.removeViewerChrome(page);
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
       if (pageNumber !== 1) {
-        await this.goToDesignPage(page, sourceUrl, pageNumber);
+        await this.goToDesignPage(page, url, pageNumber);
       }
       const size = await this.prepareContentOnlyPrint(page);
       const pagePdf = await page.pdf({
