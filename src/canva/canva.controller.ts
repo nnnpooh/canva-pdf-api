@@ -20,7 +20,7 @@ export class CanvaController {
 
     response.setHeader(
       'Content-Disposition',
-      `attachment; filename="${result.fileName}"`,
+      `inline; filename="${result.fileName}"`,
     );
     response.setHeader('Content-Length', result.buffer.length);
     response.send(result.buffer);
