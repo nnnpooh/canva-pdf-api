@@ -78,16 +78,21 @@ export class CanvaExportService {
           waitUntil: "load",
           timeout: this.timeoutMs,
         });
-        await page.waitForSelector("._5yhCRQ", {
-          visible: true,
-          timeout: this.timeoutMs,
-        });
-        this.assertResolvedCanvaUrl(page.url());
+        const [baseUrl, totalPageCount] =
+          await this.assertResolvedCanvaUrl(page);
 
-        const buffer = await this.triggerPrintToPdf(page);
+        const buffer = await this.triggerPrintToPdf(
+          page,
+          baseUrl,
+          totalPageCount,
+        );
 
         return { fileName, buffer };
       } catch (error) {
+        if (error instanceof HttpException) {
+          throw error;
+        }
+
         this.logger.error(error);
         throw new BadGatewayException(
           "Could not export this public Canva link to PDF",
@@ -145,6 +150,7 @@ export class CanvaExportService {
 
   private async launchBrowser() {
     const options: LaunchOptions = {
+      // headless: false,
       headless: process.env.PUPPETEER_HEADLESS === "false" ? false : "shell",
       args: this.commonChromiumArgs,
     };
@@ -222,31 +228,58 @@ export class CanvaExportService {
     }
   }
 
-  private assertResolvedCanvaUrl(url: string) {
-    const parsedUrl = new URL(url);
+  private async assertResolvedCanvaUrl(page: Page): Promise<[string, number]> {
+    const parsedUrl = new URL(page.url());
 
     if (!["canva.com", "www.canva.com"].includes(parsedUrl.hostname)) {
       throw new BadRequestException(
         "Canva short link did not resolve to a public canva.com page",
       );
     }
-  }
-
-  private async triggerPrintToPdf(page: Page) {
-    const sourceUrl = page.url().split("?")?.[0];
-    await page.goto(sourceUrl + "#1", {
+    const sourceUrl = parsedUrl.origin + parsedUrl.pathname;
+    if (!sourceUrl.endsWith("view")) {
+      throw new BadRequestException("Canva video links are not supported");
+    }
+    const totalPageCount = await this.detectTotalPageCount(page);
+    await page.goto(sourceUrl + `#${totalPageCount}`, {
       waitUntil: "networkidle2",
       timeout: this.timeoutMs,
     });
+    await this.removeViewerChrome(page);
+
+    return [sourceUrl, totalPageCount];
+  }
+
+  private async detectTotalPageCount(page: Page) {
+    await page.waitForSelector(".QxuLlQ", {
+      visible: true,
+      timeout: this.timeoutMs,
+    });
+
+    const totalPageCount = await page.evaluate(() => {
+      const pageCountValues = Array.from(
+        document.querySelectorAll<HTMLElement>(".QxuLlQ"),
+      )
+        .map((element) => Number(element.textContent?.trim()))
+        .filter((value) => Number.isInteger(value) && value > 0);
+
+      return pageCountValues[pageCountValues.length - 1] ?? 1;
+    });
+
+    return totalPageCount;
+  }
+
+  private async triggerPrintToPdf(
+    page: Page,
+    url: string,
+    totalPageCount: number,
+  ) {
     await page.emulateMediaType("screen");
 
-    const pageCount = await this.detectPageCount(page);
     const outputPdf = await PDFDocument.create();
-    await this.removeViewerChrome(page);
-    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-      if (pageNumber !== 1) {
-        await this.goToDesignPage(page, sourceUrl, pageNumber);
-      }
+    for (let pageNumber = totalPageCount; pageNumber >= 1; pageNumber--) {
+      await this.goToDesignPage(page, url, pageNumber);
+
       const size = await this.prepareContentOnlyPrint(page);
       const pagePdf = await page.pdf({
         printBackground: true,
@@ -258,7 +291,7 @@ export class CanvaExportService {
       const inputPdf = await PDFDocument.load(pagePdf);
       const [inputPage] = await outputPdf.copyPages(inputPdf, [0]);
 
-      outputPdf.addPage(inputPage);
+      outputPdf.insertPage(0, inputPage);
     }
 
     return Buffer.from(await outputPdf.save());
@@ -346,36 +379,19 @@ export class CanvaExportService {
     return size;
   }
 
-  private async detectPageCount(page: Page) {
-    const pageCount = await page.evaluate(() => {
-      return document.querySelectorAll("._5yhCRQ").length;
-    });
-
-    return pageCount > 0 ? pageCount : 1;
-  }
-
   private async goToDesignPage(
     page: Page,
     sourceUrl: string,
     pageNumber: number,
   ) {
-    const pageUrl = this.withPageHash(sourceUrl, pageNumber);
+    await page.goto(sourceUrl + `#${pageNumber}`, {
+      waitUntil: "domcontentloaded",
+      timeout: this.timeoutMs,
+    });
 
-    if (page.url() !== pageUrl) {
-      await page.goto(pageUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: this.timeoutMs,
-      });
+    if (pageNumber === pageNumber) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  private withPageHash(url: string, pageNumber: number) {
-    const parsedUrl = new URL(url);
-    parsedUrl.hash = String(pageNumber);
-
-    return parsedUrl.toString();
   }
 
   private async removeViewerChrome(page: Page) {
