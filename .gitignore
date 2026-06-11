@@ -6,3 +6,6 @@ storage/downloads/*
 !storage/downloads/.gitkeep
 .vercel
 .env*.local
+
+ai-guide/*
+AI_CONTEXT.md

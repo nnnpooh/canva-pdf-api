@@ -6,7 +6,7 @@ import {
   Injectable,
   Logger,
 } from "@nestjs/common";
-import { createHash, randomUUID } from "crypto";
+import { createHash } from "crypto";
 import { basename, extname, join } from "path";
 import { pathToFileURL } from "url";
 import { PDFDocument } from "pdf-lib";
@@ -63,9 +63,6 @@ export class CanvaExportService {
     this.assertWithinRateLimit();
 
     return this.runExclusiveExport(async () => {
-      const id = randomUUID();
-      const fileName = `${this.slugFromUrl(url)}-${id}.pdf`;
-
       let browser: Browser | undefined;
 
       try {
@@ -80,6 +77,7 @@ export class CanvaExportService {
         });
         const [baseUrl, totalPageCount] =
           await this.assertResolvedCanvaUrl(page);
+        const fileName = this.fileNameFromTitle(await page.title(), url);
 
         const buffer = await this.triggerPrintToPdf(
           page,
@@ -502,5 +500,16 @@ export class CanvaExportService {
     }
 
     return createHash("sha1").update(url).digest("hex").slice(0, 10);
+  }
+
+  private fileNameFromTitle(title: string, url: string) {
+    const sanitizedTitle = title
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, "")
+      .replace(/\.+$/g, "");
+    const baseName = sanitizedTitle || this.slugFromUrl(url);
+
+    return `${baseName}.pdf`;
   }
 }

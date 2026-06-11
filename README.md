@@ -48,3 +48,16 @@ CANVA_EXPORT_RATE_LIMIT_WINDOW_MS=60000
 ```
 
 API xếp hàng và chỉ xử lý 1 file tại một thời điểm trên mỗi server instance, đồng thời nhận tối đa 10 lượt export mỗi 60 giây theo cấu hình trên.
+
+Cache PDF cho API GET bằng Vercel Blob:
+
+```bash
+BLOB_STORE_ID=store_xxx
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_xxx
+CANVA_EXPORT_GET_CACHE_ENABLED=true
+CANVA_EXPORT_GET_CACHE_TTL_MS=600000
+CANVA_EXPORT_BLOB_CACHE_ACCESS=private
+```
+
+`GET /canva/export?url=...` sẽ trả header `X-Cache: HIT`, `MISS`, hoặc `BYPASS`. Cache được lưu trong folder `canva-export-cache/` trên Vercel Blob.
+Đặt `CANVA_EXPORT_GET_CACHE_ENABLED=false` để tắt cache GET khi cần test tính năng khác.
