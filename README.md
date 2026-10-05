@@ -1,4 +1,4 @@
-# Canva PDF API 
+# Canva PDF API (NR Edition)
 
 > Note that this branch is the NR Edition.
 
