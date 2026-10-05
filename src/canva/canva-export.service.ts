@@ -66,7 +66,9 @@ export class CanvaExportService {
       let browser: Browser | undefined;
 
       try {
+        this.logger.log(`Launching browser for ${url}`);
         browser = await this.launchBrowser();
+        this.logger.log("Browser launched");
 
         const page = await browser.newPage();
         await page.setViewport({ width: 1440, height: 1000 });
@@ -75,8 +77,10 @@ export class CanvaExportService {
           waitUntil: "load",
           timeout: this.timeoutMs,
         });
+        this.logger.log(`Loaded ${page.url()}`);
         const [baseUrl, totalPageCount] =
           await this.assertResolvedCanvaUrl(page);
+        this.logger.log(`Detected ${totalPageCount} page(s)`);
         const fileName = this.fileNameFromTitle(await page.title(), url);
 
         const buffer = await this.triggerPrintToPdf(
@@ -249,19 +253,17 @@ export class CanvaExportService {
   }
 
   private async detectTotalPageCount(page: Page) {
-    await page.waitForSelector(".QxuLlQ", {
-      visible: true,
-      timeout: this.timeoutMs,
-    });
+    await page
+      .waitForFunction(() => /\b\d+\s*\/\s*\d+\b/.test(document.body.innerText), {
+        timeout: 15_000,
+      })
+      .catch(() => {
+        this.logger.warn("Page counter text not found; assuming 1 page");
+      });
 
     const totalPageCount = await page.evaluate(() => {
-      const pageCountValues = Array.from(
-        document.querySelectorAll<HTMLElement>(".QxuLlQ"),
-      )
-        .map((element) => Number(element.textContent?.trim()))
-        .filter((value) => Number.isInteger(value) && value > 0);
-
-      return pageCountValues[pageCountValues.length - 1] ?? 1;
+      const match = document.body.innerText.match(/\b\d+\s*\/\s*(\d+)\b/);
+      return match ? Number(match[1]) : 1;
     });
 
     return totalPageCount;
@@ -276,6 +278,8 @@ export class CanvaExportService {
 
     const outputPdf = await PDFDocument.create();
     for (let pageNumber = totalPageCount; pageNumber >= 1; pageNumber--) {
+      // Hash navigation keeps the previous page's viewport, so detection would otherwise drift.
+      await page.setViewport({ width: 1440, height: 1000 });
       await this.goToDesignPage(page, url, pageNumber);
 
       const size = await this.prepareContentOnlyPrint(page);
@@ -290,6 +294,9 @@ export class CanvaExportService {
       const [inputPage] = await outputPdf.copyPages(inputPdf, [0]);
 
       outputPdf.insertPage(0, inputPage);
+      this.logger.log(
+        `Rendered page ${pageNumber} (${totalPageCount - pageNumber + 1}/${totalPageCount})`,
+      );
     }
 
     return Buffer.from(await outputPdf.save());
@@ -382,14 +389,15 @@ export class CanvaExportService {
     sourceUrl: string,
     pageNumber: number,
   ) {
+    // Hash-only navigation keeps styles injected for the previous page, so force a full reload.
+    await page.goto("about:blank");
     await page.goto(sourceUrl + `#${pageNumber}`, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "networkidle2",
       timeout: this.timeoutMs,
     });
+    await this.removeViewerChrome(page);
 
-    if (pageNumber === pageNumber) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
   private async removeViewerChrome(page: Page) {

@@ -68,9 +68,17 @@ export class CanvaController {
     result: ExportedPdf,
     cacheStatus?: "HIT" | "MISS" | "BYPASS",
   ) {
+    const asciiName = result.fileName
+      .replace(/[^\x20-\x7E]/g, "")
+      .replace(/["\\]/g, "")
+      .trim();
+    const safeAsciiName = /^\.?pdf$|^\.pdf$/i.test(asciiName) || !asciiName
+      ? "canva.pdf"
+      : asciiName;
+
     response.setHeader(
       "Content-Disposition",
-      `inline; filename="${result.fileName}"`,
+      `inline; filename="${safeAsciiName}"; filename*=UTF-8''${encodeURIComponent(result.fileName)}`,
     );
     response.setHeader("Content-Length", result.buffer.length);
 

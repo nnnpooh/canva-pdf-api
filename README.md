@@ -1,4 +1,6 @@
-# Canva PDF API
+# Canva PDF API 
+
+> Note that this branch is the NR Edition.
 
 NestJS API that converts a public Canva design link into a downloadable PDF.
 
